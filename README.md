@@ -4,6 +4,7 @@ This article introduces a lightweight solution for implementing field-level line
 2. Uses S3 as an intermediate layer for decoupling, providing good scalability;
 3. Supports precise field-level lineage tracking;
 4. Can be easily extended to other compute engines such as Hive/Spark/Flink, etc.
+
 This solution provides data teams with a practical data lineage tracking tool that aids in data governance, impact analysis, troubleshooting, and performance optimization tasks.
 
 <img src="https://s3.cn-north-1.amazonaws.com.cn/awschinablog/automatic-generation-of-field-level-bloodlines-based-on-datahub-and-redshift1.jpg" alt="架构图" />
