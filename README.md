@@ -9,7 +9,7 @@ please refer to package_lambda_layer.sh
 
 ## create two lambda function using generate_sql.py and parse_sql.py
 
-#  create a daily schedule using Eventbrige
+## create a daily schedule using Eventbrige
 
 
 # More Details
