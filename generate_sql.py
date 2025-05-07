@@ -20,6 +20,8 @@ REDSHIFT_CONFIG = {
 
 project_name = os.environ['PROJECT_NAME']
 bucket_name = os.environ['S3_BUCKET']
+batch_size = int(os.environ.get('BATCH_SIZE', 1000))
+processed_tables = set()  # 用于记录已处理的目标表
 
 def get_table_ddl(conn, table_name: str) -> Optional[str]:
     """获取Redshift表的DDL"""
@@ -62,8 +64,29 @@ def get_full_sql(conn, query_id: int) -> Optional[str]:
     except Exception as e:
         logger.error(f"获取完整SQL失败: {str(e)}")
         return None
-
-def get_today_insert_queries(conn) -> List[Dict[str, Any]]:
+def count_today_insert_queries(conn) -> int:
+    """获取今天执行的所有INSERT语句，返回包含多个字段的字典列表"""
+    try:
+        with conn.cursor() as cur:
+            query = """
+            SELECT count(1)
+            FROM SYS_QUERY_HISTORY 
+            WHERE query_type = 'INSERT' 
+            AND start_time >= TRUNC(SYSDATE)
+            AND status = 'success'  -- 只获取执行成功的语句
+            ;
+            """
+            cur.execute(query)
+            results = cur.fetchall()
+            
+            # 直接返回查询结果的第一行第一列（count值）
+            if results and len(results) > 0:
+                return results[0][0]
+            return 0
+    except Exception as e:
+        logger.error(f"获取INSERT语句失败: {str(e)}")
+        return None
+def get_today_insert_queries(conn, limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
     """获取今天执行的所有INSERT语句，返回包含多个字段的字典列表"""
     try:
         with conn.cursor() as cur:
@@ -73,9 +96,10 @@ def get_today_insert_queries(conn) -> List[Dict[str, Any]]:
             WHERE query_type = 'INSERT' 
             AND start_time >= TRUNC(SYSDATE)
             AND status = 'success'  -- 只获取执行成功的语句
-            ORDER BY end_time DESC;
+            ORDER BY end_time DESC
+            LIMIT %s OFFSET %s;
             """
-            cur.execute(query)
+            cur.execute(query, (limit, offset))
             results = cur.fetchall()
             
             # 将结果转换为字典列表
@@ -91,21 +115,22 @@ def get_today_insert_queries(conn) -> List[Dict[str, Any]]:
         logger.error(f"获取INSERT语句失败: {str(e)}")
         return []
 
-def save_queries_to_s3(insert_queries: List[Dict[str, Any]]) -> None:
+
+def save_queries_to_s3(insert_queries: List[Dict[str, Any]], batch_num: int = 1) -> None:
     """将INSERT语句保存到本地文件并上传到S3"""
     try:
-        processed_tables = set()  # 用于记录已处理的目标表
+        global processed_tables
         ddl_tables = set()  # 用于记录已获取过DDL的表
         # 为DDL查询创建独立连接
         with psycopg2.connect(**REDSHIFT_CONFIG) as ddl_conn:
             # Lambda中使用/tmp目录进行临时文件存储
-            local_path = f'/tmp/sql_queries_{project_name}.sql'
+            local_path = f'/tmp/sql_queries_{project_name}_batch{batch_num}.sql'
 
             with open(local_path, 'w', encoding='utf-8') as f:
                 for query_info in insert_queries:
                     try:
                         query = query_info["query_text"]
-                        # 检查SQL长度是否超过3990字符，如果超过则获取完整SQL
+                        # 检查SQL长度是否超过3990字符(超过 4000 会被截断)，如果超过则获取完整SQL
                         if len(query) > 3990:
                             logger.info(f"SQL长度超过3990字符，尝试获取完整SQL，query_id: {query_info['query_id']}")
                             full_sql = get_full_sql(ddl_conn, query_info['query_id'])
@@ -164,7 +189,9 @@ def save_queries_to_s3(insert_queries: List[Dict[str, Any]]) -> None:
                         continue
 
             # 上传到S3
-            s3_key = f'sql-scripts/sql_queries_{project_name}.sql'
+            from datetime import datetime
+            current_date = datetime.now().strftime('%Y-%m-%d')
+            s3_key = f'sql-scripts/sql_queries_{project_name}_{current_date}_batch{batch_num}.sql'
             s3_client = boto3.client('s3')
             s3_client.upload_file(local_path, bucket_name, s3_key)
 
@@ -178,27 +205,46 @@ def save_queries_to_s3(insert_queries: List[Dict[str, Any]]) -> None:
 def lambda_handler(event, context):
     """Lambda处理函数"""
     try:
+        # 每次执行时重置全局变量
+        global processed_tables
+        processed_tables = set()
+        
         # 查询INSERT语句使用独立连接
         with psycopg2.connect(**REDSHIFT_CONFIG) as conn:
-            insert_queries = get_today_insert_queries(conn)
-            if not insert_queries:
+            # 先获取今日插入查询的总数
+            total_queries = count_today_insert_queries(conn)
+            if total_queries == 0:
                 logger.warning("未找到今天的INSERT语句")
                 return {
                     'statusCode': 200,
                     'body': '未找到今天的INSERT语句'
                 }
-
-        # 保存查询时使用新的连接
-        save_queries_to_s3(insert_queries)
+            
+            logger.info(f"今日共有 {total_queries} 条INSERT语句")
+            
+            # 按照100条一个批次处理
+            global batch_size
+            batch_count = (total_queries + batch_size - 1) // batch_size  # 向上取整计算批次数
+            
+            for batch_num in range(1, batch_count + 1):
+                offset = (batch_num - 1) * batch_size
+                logger.info(f"处理第 {batch_num}/{batch_count} 批次，偏移量: {offset}")
+                
+                # 获取当前批次的查询
+                batch_queries = get_today_insert_queries(conn, batch_size, offset)
+                if not batch_queries:
+                    logger.warning(f"第 {batch_num} 批次未获取到查询")
+                    continue
+                
+                # 保存当前批次的查询
+                save_queries_to_s3(batch_queries, batch_num)
+                logger.info(f"第 {batch_num} 批次处理完成")
 
         return {
             'statusCode': 200,
-            'body': 'SQL查询已成功保存到S3'
+            'body': f'SQL查询已成功保存到S3，共处理 {batch_count} 个批次'
         }
 
     except Exception as e:
-        logger.error(f"处理SQL失败: {str(e)}")
-        return {
-            'statusCode': 500,
-            'body': f'处理失败: {str(e)}'
-        }
+        logger.error(f"生成SQL失败: {str(e)}")
+        raise
