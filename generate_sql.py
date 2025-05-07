@@ -24,34 +24,51 @@ bucket_name = os.environ['S3_BUCKET']
 def get_table_ddl(conn, table_name: str) -> Optional[str]:
     """获取Redshift表的DDL"""
     try:
-        # 创建新的连接
-        with psycopg2.connect(**REDSHIFT_CONFIG) as new_conn:
-            with new_conn.cursor() as cur:
-                db_name = REDSHIFT_CONFIG['database']
-                if '.' in table_name and len(table_name.split('.')) == 2 :
-                    query = f'SHOW TABLE {table_name};'
-                else:
-                    query = f'SHOW TABLE {db_name}.{table_name};'
-                # 将默认schema '<default>'替换为'public'
-                query = query.replace('<default>', 'public')
+        with conn.cursor() as cur:
+            db_name = REDSHIFT_CONFIG['database']
+            if '.' in table_name and len(table_name.split('.')) == 2 :
+                query = f'SHOW TABLE {table_name};'
+            else:
+                query = f'SHOW TABLE {db_name}.{table_name};'
+            # 将默认schema '<default>'替换为'public'
+            query = query.replace('<default>', 'public')
 
-                logger.info(f"执行查询: {query}")
+            logger.info(f"执行查询: {query}")
 
-                cur.execute(query)
-                ddl = cur.fetchone()[0]  # 修复了变量赋值的空格问题
-                # 替换DISTSTYLE AUTO为分号
-                ddl = ddl.replace("DISTSTYLE AUTO;", ";")
-                return ddl
+            cur.execute(query)
+            ddl = cur.fetchone()[0]  # 修复了变量赋值的空格问题
+            # 替换DISTSTYLE AUTO为分号
+            ddl = ddl.replace("DISTSTYLE AUTO;", ";")
+            return ddl
     except Exception as e:
         logger.error(f"获取表 {table_name} DDL失败: {str(e)}")
         return None
 
-def get_today_insert_queries(conn) -> List[str]:
-    """获取今天执行的所有INSERT语句"""
+# 针对部分sql被截断的场景，获取完整的SQL语句
+def get_full_sql(conn, query_id: int) -> Optional[str]:
     try:
         with conn.cursor() as cur:
             query = """
-            SELECT query_text 
+            SELECT LISTAGG(text, '') WITHIN GROUP (ORDER BY sequence) AS full_query
+            FROM SYS_QUERY_TEXT
+            WHERE query_id = %s
+            """
+            cur.execute(query, (query_id,))
+            result = cur.fetchone()
+
+            if result:
+                return result[0]  # 返回完整的SQL文本
+            return None
+    except Exception as e:
+        logger.error(f"获取完整SQL失败: {str(e)}")
+        return None
+
+def get_today_insert_queries(conn) -> List[Dict[str, Any]]:
+    """获取今天执行的所有INSERT语句，返回包含多个字段的字典列表"""
+    try:
+        with conn.cursor() as cur:
+            query = """
+            SELECT query_id, transaction_id, query_text 
             FROM SYS_QUERY_HISTORY 
             WHERE query_type = 'INSERT' 
             AND start_time >= TRUNC(SYSDATE)
@@ -59,12 +76,22 @@ def get_today_insert_queries(conn) -> List[str]:
             ORDER BY end_time DESC;
             """
             cur.execute(query)
-            return [row[0] for row in cur.fetchall()]
+            results = cur.fetchall()
+
+            # 将结果转换为字典列表
+            return [
+                {
+                    "query_id": row[0],
+                    "transaction_id": row[1],
+                    "query_text": row[2]
+                }
+                for row in results
+            ]
     except Exception as e:
         logger.error(f"获取INSERT语句失败: {str(e)}")
         return []
 
-def save_queries_to_s3(insert_queries: List[str]) -> None:
+def save_queries_to_s3(insert_queries: List[Dict[str, Any]]) -> None:
     """将INSERT语句保存到本地文件并上传到S3"""
     try:
         processed_tables = set()  # 用于记录已处理的目标表
@@ -75,8 +102,9 @@ def save_queries_to_s3(insert_queries: List[str]) -> None:
             local_path = f'/tmp/sql_queries_{project_name}.sql'
 
             with open(local_path, 'w', encoding='utf-8') as f:
-                for query in insert_queries:
+                for query_info in insert_queries:
                     try:
+                        query = query_info["query_text"]
                         # 将\n转换为实际换行符
                         query = query.replace('\\n', '\n')
                         query = f"{query};"  # 加上分号结尾
@@ -92,11 +120,12 @@ def save_queries_to_s3(insert_queries: List[str]) -> None:
 
                         should_skip = False
 
-                        table_str = target_tables[0].__str__()
-                        if table_str in processed_tables:
-                            logger.info(f"目标表 {table_str} 已处理过,跳过该SQL")
-                            should_skip = True
-                        processed_tables.add(table_str)
+                        if target_tables:
+                            table_str = target_tables[0].__str__()
+                            if table_str in processed_tables:
+                                logger.info(f"目标表 {table_str} 已处理过,跳过该SQL")
+                                should_skip = True
+                            processed_tables.add(table_str)
 
                         if should_skip:
                             continue
