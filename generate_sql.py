@@ -55,7 +55,7 @@ def get_full_sql(conn, query_id: int) -> Optional[str]:
             """
             cur.execute(query, (query_id,))
             result = cur.fetchone()
-
+            
             if result:
                 return result[0]  # 返回完整的SQL文本
             return None
@@ -77,7 +77,7 @@ def get_today_insert_queries(conn) -> List[Dict[str, Any]]:
             """
             cur.execute(query)
             results = cur.fetchall()
-
+            
             # 将结果转换为字典列表
             return [
                 {
@@ -105,6 +105,15 @@ def save_queries_to_s3(insert_queries: List[Dict[str, Any]]) -> None:
                 for query_info in insert_queries:
                     try:
                         query = query_info["query_text"]
+                        # 检查SQL长度是否超过3990字符，如果超过则获取完整SQL
+                        if len(query) > 3990:
+                            logger.info(f"SQL长度超过3990字符，尝试获取完整SQL，query_id: {query_info['query_id']}")
+                            full_sql = get_full_sql(ddl_conn, query_info['query_id'])
+                            if full_sql:
+                                query = full_sql
+                                logger.info("成功获取完整SQL")
+                            else:
+                                logger.warning(f"无法获取完整SQL，使用原始截断SQL，query_id: {query_info['query_id']}")
                         # 将\n转换为实际换行符
                         query = query.replace('\\n', '\n')
                         query = f"{query};"  # 加上分号结尾
