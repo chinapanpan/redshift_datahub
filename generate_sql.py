@@ -28,12 +28,12 @@ def get_table_ddl(conn, table_name: str) -> Optional[str]:
         with psycopg2.connect(**REDSHIFT_CONFIG) as new_conn:
             with new_conn.cursor() as cur:
                 db_name = REDSHIFT_CONFIG['database']
-                if '.' in table_name and table_name.split('.')[0] == db_name:
+                if '.' in table_name and len(table_name.split('.')) == 2 :
                     query = f'SHOW TABLE {table_name};'
                 else:
                     query = f'SHOW TABLE {db_name}.{table_name};'
-                    # 将默认schema '<default>'替换为'public'
-                    query = query.replace('<default>', 'public')
+                # 将默认schema '<default>'替换为'public'
+                query = query.replace('<default>', 'public')
 
                 logger.info(f"执行查询: {query}")
 
