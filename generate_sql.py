@@ -76,48 +76,54 @@ def save_queries_to_s3(insert_queries: List[str]) -> None:
 
             with open(local_path, 'w', encoding='utf-8') as f:
                 for query in insert_queries:
-                    # 将\n转换为实际换行符
-                    query = query.replace('\\n', '\n')
-                    query = f"{query};"  # 加上分号结尾
+                    try:
+                        # 将\n转换为实际换行符
+                        query = query.replace('\\n', '\n')
+                        query = f"{query};"  # 加上分号结尾
 
-                    # 分析SQL依赖的表
-                    result = LineageRunner(query, dialect="redshift")
-                    tables = result.source_tables
-                    logger.info(f"SQL涉及的表: {tables}")
+                        # 分析SQL依赖的表
+                        result = LineageRunner(query, dialect="redshift")
+                        tables = result.source_tables
+                        logger.info(f"SQL涉及的表: {tables}")
 
-                    # 获取目标表
-                    target_tables = result.target_tables
-                    logger.info(f"目标表: {target_tables}")
+                        # 获取目标表
+                        target_tables = result.target_tables
+                        logger.info(f"目标表: {target_tables}")
 
-                    should_skip = False
+                        should_skip = False
 
-                    table_str = target_tables[0].__str__()
-                    if table_str in processed_tables:
-                        logger.info(f"目标表 {table_str} 已处理过,跳过该SQL")
-                        should_skip = True
-                    processed_tables.add(table_str)
+                        table_str = target_tables[0].__str__()
+                        if table_str in processed_tables:
+                            logger.info(f"目标表 {table_str} 已处理过,跳过该SQL")
+                            should_skip = True
+                        processed_tables.add(table_str)
 
-                    if should_skip:
-                        continue
-
-                    # 获取每张表的DDL
-                    for table in tables:
-                        # 将table对象转换为字符串
-                        table_name = table.__str__()
-                        # 检查表是否已经获取过DDL
-                        if table_name in ddl_tables:
-                            logger.info(f"表 {table_name} 的DDL已获取过,跳过")
+                        if should_skip:
                             continue
-                        ddl_tables.add(table_name)
-                        ddl = get_table_ddl(ddl_conn, table_name)
 
-                        if ddl:  # 修复了缩进问题
-                            f.write(f"\n-- DDL for table {table_name}:\n{ddl}\n")
-                        else:
-                            f.write(f"\n-- Failed to get DDL for table {table_name}\n")
-                        f.write("-" * 80 + "\n")
+                        # 获取每张表的DDL
+                        for table in tables:
+                            # 将table对象转换为字符串
+                            table_name = table.__str__()
+                            # 检查表是否已经获取过DDL
+                            if table_name in ddl_tables:
+                                logger.info(f"表 {table_name} 的DDL已获取过,跳过")
+                                continue
+                            ddl_tables.add(table_name)
+                            ddl = get_table_ddl(ddl_conn, table_name)
 
-                    f.write(f"{query}\n{'-' * 80}\n")
+                            if ddl:  # 修复了缩进问题
+                                f.write(f"\n-- DDL for table {table_name}:\n{ddl}\n")
+                            else:
+                                f.write(f"\n-- Failed to get DDL for table {table_name}\n")
+                            f.write("-" * 80 + "\n")
+
+                        f.write(f"{query}\n{'-' * 80}\n")
+                    except Exception as e:
+                        logger.error(f"处理SQL查询时出错: {str(e)}")
+                        logger.error(f"出错的SQL: {query[:200]}...")
+                        # 继续处理下一个查询
+                        continue
 
             # 上传到S3
             s3_key = f'sql-scripts/sql_queries_{project_name}.sql'
