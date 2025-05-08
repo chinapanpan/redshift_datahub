@@ -24,9 +24,15 @@ project_name = os.environ['PROJECT_NAME']
 bucket_name = os.environ['S3_BUCKET']
 batch_size = int(os.environ.get('BATCH_SIZE', 500))
 processed_tables = set()  # 用于记录已处理的目标表
-
+# 用于缓存表DDL的字典
+table_ddl_cache = {}
 def get_table_ddl(conn, table_name: str) -> Optional[str]:
     """获取Redshift表的DDL"""
+    global table_ddl_cache
+    # 检查缓存中是否已存在
+    if table_name in table_ddl_cache:
+        print(f"从缓存获取表 {table_name} 的DDL")
+        return table_ddl_cache[table_name]
     try:
         with conn.cursor() as cur:
             db_name = REDSHIFT_CONFIG['database']
@@ -48,6 +54,8 @@ def get_table_ddl(conn, table_name: str) -> Optional[str]:
             ddl = result[0]
             # 替换DISTSTYLE AUTO为分号
             ddl = ddl.replace("DISTSTYLE AUTO;", ";")
+            # 将结果存入缓存
+            table_ddl_cache[table_name] = ddl
             return ddl
     except Exception as e:
         logger.error(f"获取表 {table_name} DDL失败: {str(e)}")
@@ -128,7 +136,29 @@ def get_today_insert_queries(conn, limit: int = 100, offset: int = 0) -> List[Di
         logger.error(f"获取INSERT语句失败: {str(e)}")
         return []
 
+# 创建全局缓存字典，用于存储已解析的SQL结果
+sql_cache = {}
 
+def parseSQL(query):
+    """解析SQL语句，如果SQL较长且已缓存，则直接返回缓存结果"""
+    global sql_cache
+    cache_key=''
+    # 如果SQL长度大于200字符，使用前200字符作为缓存键
+    if len(query) > 200:
+        cache_key = query[:200]
+        if cache_key in sql_cache:
+            print("命中缓存，直接返回解析结果")
+            return sql_cache[cache_key]
+    else:
+        cache_key = query
+        if cache_key in sql_cache:
+            print("命中缓存，直接返回解析结果")
+            return sql_cache[cache_key]
+
+    # 如果没有命中缓存，解析SQL并存入缓存
+    result = LineageRunner(query, dialect="redshift")
+    sql_cache[cache_key] = result
+    return result
 def save_queries_to_s3(insert_queries: List[Dict[str, Any]], batch_num: int = 1) -> None:
     """将INSERT语句保存到本地文件并上传到S3"""
     try:
@@ -164,7 +194,7 @@ def save_queries_to_s3(insert_queries: List[Dict[str, Any]], batch_num: int = 1)
                         query = f"{query};"  # 加上分号结尾
 
                         # 分析SQL依赖的表
-                        result = LineageRunner(query, dialect="redshift")
+                        result = parseSQL(query)
                         tables = result.source_tables
                         print(f"SQL涉及的表: {tables}")
 
