@@ -23,6 +23,13 @@ REDSHIFT_CONFIG = {
 project_name = os.environ['PROJECT_NAME']
 bucket_name = os.environ['S3_BUCKET']
 batch_size = int(os.environ.get('BATCH_SIZE', 500))
+last_hours = int(os.environ.get('LAST_HOURS', 0))
+query_time_cond="AND start_time >= TRUNC(SYSDATE)"
+# 根据last_hours设置查询时间条件
+if last_hours > 0:
+    query_time_cond = f"AND start_time >= DATEADD(hour, {0-last_hours}, GETDATE())"
+
+
 processed_tables = set()  # 用于记录已处理的目标表
 # 用于缓存表DDL的字典
 table_ddl_cache = {}
@@ -87,11 +94,10 @@ def count_today_insert_queries(conn) -> int:
             query = """
             SELECT count(1)
             FROM SYS_QUERY_HISTORY 
-            WHERE query_type = 'INSERT' 
-            AND start_time >= TRUNC(SYSDATE)
+            WHERE query_type = 'INSERT'  
+            """ + query_time_cond + """
             AND status = 'success'  -- 只获取执行成功的语句
             AND LOWER(query_text) not LIKE '%mv_tbl%'
-            ;
             """
             cur.execute(query)
             results = cur.fetchall()
@@ -112,11 +118,10 @@ def get_today_insert_queries(conn, limit: int = 100, offset: int = 0) -> List[Di
             SELECT query_id, transaction_id, query_text 
             FROM SYS_QUERY_HISTORY 
             WHERE query_type = 'INSERT' 
-            AND start_time >= TRUNC(SYSDATE)
+            """ + query_time_cond + """
             AND status = 'success'  -- 只获取执行成功的语句
             AND LOWER(query_text) not LIKE '%mv_tbl%'
             ORDER BY end_time DESC
-            
             """
 
             limitcond=f"LIMIT {limit} OFFSET {offset};"
@@ -239,6 +244,7 @@ def save_queries_to_s3(insert_queries: List[Dict[str, Any]], batch_num: int = 1)
                         continue
 
             # 上传到S3
+            print(f"文件准备上传到S3: {local_path}")
             s3_key = f'sql-scripts/sql_queries_{project_name}_{current_date}_batch{batch_num}.sql'
             s3_client = boto3.client('s3')
             s3_client.upload_file(local_path, bucket_name, s3_key)
