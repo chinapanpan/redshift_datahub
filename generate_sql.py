@@ -22,7 +22,7 @@ REDSHIFT_CONFIG = {
 
 project_name = os.environ['PROJECT_NAME']
 bucket_name = os.environ['S3_BUCKET']
-batch_size = int(os.environ.get('BATCH_SIZE', 500))
+batch_size = int(os.environ.get('BATCH_SIZE', 400))
 last_hours = int(os.environ.get('LAST_HOURS', 0))
 query_time_cond="AND start_time >= TRUNC(SYSDATE)"
 # 根据last_hours设置查询时间条件
