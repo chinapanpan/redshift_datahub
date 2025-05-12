@@ -22,7 +22,7 @@ REDSHIFT_CONFIG = {
 
 project_name = os.environ['PROJECT_NAME']
 bucket_name = os.environ['S3_BUCKET']
-batch_size = int(os.environ.get('BATCH_SIZE', 400))
+batch_size = int(os.environ.get('BATCH_SIZE', 500))
 last_hours = int(os.environ.get('LAST_HOURS', 0))
 query_time_cond="AND start_time >= TRUNC(SYSDATE)"
 # 根据last_hours设置查询时间条件
@@ -43,7 +43,7 @@ def get_table_ddl(conn, table_name: str) -> Optional[str]:
     try:
         with conn.cursor() as cur:
             db_name = REDSHIFT_CONFIG['database']
-            if '.' in table_name and len(table_name.split('.')) == 2:
+            if '.' in table_name and len(table_name.split('.')) == 3:
                 query = f'SHOW TABLE {table_name};'
             else:
                 query = f'SHOW TABLE {db_name}.{table_name};'
@@ -171,6 +171,7 @@ def save_queries_to_s3(insert_queries: List[Dict[str, Any]], batch_num: int = 1)
         ddl_tables = set()  # 用于记录已获取过DDL的表
         # 为DDL查询创建独立连接
         with psycopg2.connect(**REDSHIFT_CONFIG) as ddl_conn:
+            ddl_conn.setAutoCommit(true);
             # Lambda中使用/tmp目录进行临时文件存储
             current_date = datetime.now().strftime('%Y-%m-%d')
             local_path = f'/tmp/sql_queries_{project_name}_{current_date}_batch{batch_num}.sql'
