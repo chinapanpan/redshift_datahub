@@ -38,18 +38,25 @@ table_ddl_cache = {}
 def get_real_tableName(table_name: str):
     db_name = REDSHIFT_CONFIG['database']
     parts = table_name.split('.')
-    res_table_name = table_name
+    table_name = table_name.replace('"','')
+    table_name = table_name.replace('<default>', 'public')
+
     if '.' in table_name and len(parts) == 3:
         res_table_name = table_name
-    else:
+    elif '.' in table_name and len(parts) == 2:
         res_table_name = f'{db_name}.{table_name}'
-    res_table_name = res_table_name.replace('<default>', 'public')
+    else:
+        res_table_name = f'{db_name}.public.{table_name}'
+
+    res_table_name = '.'.join([f'"{part}"' for part in res_table_name.split('.')])
     return res_table_name
 
 
 def get_table_ddl(conn, table_name: str) -> Optional[str]:
     """获取Redshift表的DDL"""
     global table_ddl_cache
+
+    #将schema.table 变为"db"."schema"."table"
     table_name = get_real_tableName(table_name)
 
     # 检查缓存中是否已存在
@@ -62,15 +69,14 @@ def get_table_ddl(conn, table_name: str) -> Optional[str]:
         current_conn = conn
         new_conn = None
 
-        parts = table_name.split('.')
+        parts = table_name.replace('"','').split('.')
         table_db_name = parts[0]
+        table_schema_name=parts[1]
+        table_table_name=parts[2]
 
-        # 使用双引号包裹每个部分，以处理可能包含连字符等特殊字符的名称
-        quoted_table_name = '.'.join([f'"{part}"' for part in table_name.split('.')])
-        
-        query = f'SHOW TABLE {quoted_table_name};'
-
-        # 如果数据库名不同，创建新连接
+        query = f'SHOW TABLE {table_name};'
+        print(f"执行查询: {query}")
+        # 如果查询的数据库，与当前连接的数据库名不同，创建新连接
         if table_db_name != db_name:
             new_config = REDSHIFT_CONFIG.copy()
             new_config['database'] = table_db_name
@@ -78,9 +84,8 @@ def get_table_ddl(conn, table_name: str) -> Optional[str]:
             new_conn = psycopg2.connect(**new_config)
             current_conn = new_conn
 
-        # 将默认schema '<default>'替换为'public'
-        query = query.replace('<default>', 'public')
-        print(f"执行查询: {query}")
+
+
 
         # 执行查询并处理结果
         try:
@@ -94,6 +99,7 @@ def get_table_ddl(conn, table_name: str) -> Optional[str]:
 
                 # 处理DDL并缓存
                 ddl = result[0].replace("DISTSTYLE AUTO;", ";")
+                ddl=ddl.replace(f"{table_schema_name}.{table_table_name}",table_name)
                 table_ddl_cache[table_name] = ddl
                 return ddl
         finally:
@@ -264,21 +270,31 @@ def save_queries_to_s3(insert_queries: List[Dict[str, Any]], batch_num: int = 1)
                         if should_skip:
                             continue
 
+
+
                         # 获取每张表的DDL
                         for table in tables:
                             # 将table对象转换为字符串
                             table_name = table.__str__()
+                            #当只有表名时，sqllineage为自动添加<default>.tablename，需要还原
+                            table_name=table_name.replace('<default>.', '')
+                            #转换为db.schema.table
+                            full_table_name = get_real_tableName(table_name)
+                            #将sql中引用的表名，改为全局统一的名字
+                            print(f"query={query}\n table={table_name}\n full={full_table_name}")
+                            query=query.replace(table_name,full_table_name)
+
                             # 检查表是否已经获取过DDL
-                            if table_name in ddl_tables:
-                                print(f"表 {table_name} 的DDL已获取过,跳过")
+                            if full_table_name in ddl_tables:
+                                print(f"表 {full_table_name} 的DDL已获取过,跳过")
                                 continue
-                            ddl_tables.add(table_name)
-                            ddl = get_table_ddl(ddl_conn, table_name)
+                            ddl_tables.add(full_table_name)
+                            ddl = get_table_ddl(ddl_conn, full_table_name)
 
                             if ddl:  # 修复了缩进问题
-                                f.write(f"\n-- DDL for table {table_name}:\n{ddl}\n")
+                                f.write(f"\n-- DDL for table {full_table_name}:\n{ddl}\n")
                             else:
-                                f.write(f"\n-- Failed to get DDL for table {table_name}\n")
+                                f.write(f"\n-- Failed to get DDL for table {full_table_name}\n")
                             f.write("-" * 80 + "\n")
 
                         f.write(f"{query}\n{'-' * 80}\n")
