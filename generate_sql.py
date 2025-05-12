@@ -66,6 +66,7 @@ def get_table_ddl(conn, table_name: str) -> Optional[str]:
             return ddl
     except Exception as e:
         logger.error(f"获取表 {table_name} DDL失败: {str(e)}")
+        conn.commit()
         return None
 
 # 针对部分sql被截断的场景，获取完整的SQL语句
@@ -85,6 +86,7 @@ def get_full_sql(conn, query_id: int) -> Optional[str]:
             return None
     except Exception as e:
         logger.error(f"获取完整SQL失败: {str(e)}")
+        conn.commit()
         return None
 
 def count_today_insert_queries(conn) -> int:
@@ -108,6 +110,7 @@ def count_today_insert_queries(conn) -> int:
             return 0
     except Exception as e:
         logger.error(f"获取INSERT语句数量失败: {str(e)}")
+        conn.commit()
         return 0
 
 def get_today_insert_queries(conn, limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
@@ -139,6 +142,7 @@ def get_today_insert_queries(conn, limit: int = 100, offset: int = 0) -> List[Di
             ]
     except Exception as e:
         logger.error(f"获取INSERT语句失败: {str(e)}")
+        conn.commit()
         return []
 
 # 创建全局缓存字典，用于存储已解析的SQL结果
@@ -171,7 +175,7 @@ def save_queries_to_s3(insert_queries: List[Dict[str, Any]], batch_num: int = 1)
         ddl_tables = set()  # 用于记录已获取过DDL的表
         # 为DDL查询创建独立连接
         with psycopg2.connect(**REDSHIFT_CONFIG) as ddl_conn:
-            
+
             # Lambda中使用/tmp目录进行临时文件存储
             current_date = datetime.now().strftime('%Y-%m-%d')
             local_path = f'/tmp/sql_queries_{project_name}_{current_date}_batch{batch_num}.sql'
