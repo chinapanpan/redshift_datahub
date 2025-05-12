@@ -64,7 +64,11 @@ def get_table_ddl(conn, table_name: str) -> Optional[str]:
 
         parts = table_name.split('.')
         table_db_name = parts[0]
-        query = f'SHOW TABLE {table_name};'
+
+        # 使用双引号包裹每个部分，以处理可能包含连字符等特殊字符的名称
+        quoted_table_name = '.'.join([f'"{part}"' for part in table_name.split('.')])
+        
+        query = f'SHOW TABLE {quoted_table_name};'
 
         # 如果数据库名不同，创建新连接
         if table_db_name != db_name:
