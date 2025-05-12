@@ -171,7 +171,7 @@ def save_queries_to_s3(insert_queries: List[Dict[str, Any]], batch_num: int = 1)
         ddl_tables = set()  # 用于记录已获取过DDL的表
         # 为DDL查询创建独立连接
         with psycopg2.connect(**REDSHIFT_CONFIG) as ddl_conn:
-            ddl_conn.setAutoCommit(true);
+            
             # Lambda中使用/tmp目录进行临时文件存储
             current_date = datetime.now().strftime('%Y-%m-%d')
             local_path = f'/tmp/sql_queries_{project_name}_{current_date}_batch{batch_num}.sql'
