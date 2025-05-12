@@ -24,7 +24,7 @@ project_name = os.environ['PROJECT_NAME']
 bucket_name = os.environ['S3_BUCKET']
 batch_size = int(os.environ.get('BATCH_SIZE', 500))
 last_hours = int(os.environ.get('LAST_HOURS', 0))
-query_time_cond="AND start_time >= TRUNC(SYSDATE)"
+query_time_cond = "AND start_time >= TRUNC(SYSDATE)"
 # 根据last_hours设置查询时间条件
 if last_hours > 0:
     query_time_cond = f"AND start_time >= DATEADD(hour, {0-last_hours}, GETDATE())"
@@ -33,37 +33,71 @@ if last_hours > 0:
 processed_tables = set()  # 用于记录已处理的目标表
 # 用于缓存表DDL的字典
 table_ddl_cache = {}
+
+# 生成完整的数据库名称
+def get_real_tableName(table_name: str):
+    db_name = REDSHIFT_CONFIG['database']
+    parts = table_name.split('.')
+    res_table_name = table_name
+    if '.' in table_name and len(parts) == 3:
+        res_table_name = table_name
+    else:
+        res_table_name = f'{db_name}.{table_name}'
+    res_table_name = res_table_name.replace('<default>', 'public')
+    return res_table_name
+
+
 def get_table_ddl(conn, table_name: str) -> Optional[str]:
     """获取Redshift表的DDL"""
     global table_ddl_cache
+    table_name = get_real_tableName(table_name)
+
     # 检查缓存中是否已存在
     if table_name in table_ddl_cache:
         print(f"从缓存获取表 {table_name} 的DDL")
         return table_ddl_cache[table_name]
+
     try:
-        with conn.cursor() as cur:
-            db_name = REDSHIFT_CONFIG['database']
-            if '.' in table_name and len(table_name.split('.')) == 3:
-                query = f'SHOW TABLE {table_name};'
-            else:
-                query = f'SHOW TABLE {db_name}.{table_name};'
-            # 将默认schema '<default>'替换为'public'
-            query = query.replace('<default>', 'public')
+        db_name = REDSHIFT_CONFIG['database']
+        current_conn = conn
+        new_conn = None
 
-            print(f"执行查询: {query}")
+        parts = table_name.split('.')
+        table_db_name = parts[0]
+        query = f'SHOW TABLE {table_name};'
 
-            cur.execute(query)
-            result = cur.fetchone()
-            if not result:
-                logger.warning(f"表 {table_name} 不存在或无法获取DDL")
-                return None
+        # 如果数据库名不同，创建新连接
+        if table_db_name != db_name:
+            new_config = REDSHIFT_CONFIG.copy()
+            new_config['database'] = table_db_name
+            print(f"为表 {table_name} 创建新连接到数据库 {table_db_name}")
+            new_conn = psycopg2.connect(**new_config)
+            current_conn = new_conn
 
-            ddl = result[0]
-            # 替换DISTSTYLE AUTO为分号
-            ddl = ddl.replace("DISTSTYLE AUTO;", ";")
-            # 将结果存入缓存
-            table_ddl_cache[table_name] = ddl
-            return ddl
+        # 将默认schema '<default>'替换为'public'
+        query = query.replace('<default>', 'public')
+        print(f"执行查询: {query}")
+
+        # 执行查询并处理结果
+        try:
+            with current_conn.cursor() as cur:
+                cur.execute(query)
+                result = cur.fetchone()
+
+                if not result:
+                    logger.warning(f"表 {table_name} 不存在或无法获取DDL")
+                    return None
+
+                # 处理DDL并缓存
+                ddl = result[0].replace("DISTSTYLE AUTO;", ";")
+                table_ddl_cache[table_name] = ddl
+                return ddl
+        finally:
+            # 如果创建了新连接，确保关闭它
+            if new_conn:
+                new_conn.close()
+                print(f"关闭到数据库 {table_db_name} 的连接")
+
     except Exception as e:
         logger.error(f"获取表 {table_name} DDL失败: {str(e)}")
         conn.commit()
@@ -127,7 +161,7 @@ def get_today_insert_queries(conn, limit: int = 100, offset: int = 0) -> List[Di
             ORDER BY end_time DESC
             """
 
-            limitcond=f"LIMIT {limit} OFFSET {offset};"
+            limitcond = f"LIMIT {limit} OFFSET {offset}"
             cur.execute(f"{query} {limitcond}")
             results = cur.fetchall()
 
@@ -151,7 +185,7 @@ sql_cache = {}
 def parseSQL(query):
     """解析SQL语句，如果SQL较长且已缓存，则直接返回缓存结果"""
     global sql_cache
-    cache_key=''
+    cache_key = ''
     # 如果SQL长度大于200字符，使用前200字符作为缓存键
     if len(query) > 200:
         cache_key = query[:200]
@@ -168,6 +202,7 @@ def parseSQL(query):
     result = LineageRunner(query, dialect="redshift")
     sql_cache[cache_key] = result
     return result
+
 def save_queries_to_s3(insert_queries: List[Dict[str, Any]], batch_num: int = 1) -> None:
     """将INSERT语句保存到本地文件并上传到S3"""
     try:
@@ -216,6 +251,7 @@ def save_queries_to_s3(insert_queries: List[Dict[str, Any]], batch_num: int = 1)
 
                         if target_tables:
                             table_str = target_tables[0].__str__()
+                            table_str = get_real_tableName(table_str)
                             if table_str in processed_tables:
                                 print(f"目标表 {table_str} 已处理过,跳过该SQL")
                                 should_skip = True
