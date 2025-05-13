@@ -281,7 +281,7 @@ def save_queries_to_s3(insert_queries: List[Dict[str, Any]], batch_num: int = 1)
                             #转换为db.schema.table
                             full_table_name = get_real_tableName(table_name)
                             #将sql中引用的表名，改为全局统一的名字
-                            print(f"query={query}\n table={table_name}\n full={full_table_name}")
+                            #print(f"query={query}\n table={table_name}\n full={full_table_name}")
                             query=query.replace(table_name,full_table_name)
 
                             # 检查表是否已经获取过DDL
