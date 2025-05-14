@@ -246,6 +246,8 @@ def save_queries_to_s3(insert_queries: List[Dict[str, Any]], batch_num: int = 1)
 
                         # 将\n转换为实际换行符
                         query = query.replace('\\n', '\n')
+                        #redshift 中的sys_query_histor中可能有一些占位符，类似$1
+                        query = query.replace('$', '')
                         query = f"{query};"  # 加上分号结尾
 
                         # 分析SQL依赖的表
