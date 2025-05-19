@@ -84,9 +84,6 @@ def get_table_ddl(conn, table_name: str) -> Optional[str]:
             new_conn = psycopg2.connect(**new_config)
             current_conn = new_conn
 
-
-
-
         # 执行查询并处理结果
         try:
             with current_conn.cursor() as cur:
@@ -101,6 +98,12 @@ def get_table_ddl(conn, table_name: str) -> Optional[str]:
                 ddl = result[0].replace("DISTSTYLE AUTO;", ";")
                 ddl=ddl.replace(f"{table_schema_name}.{table_table_name}",table_name)
                 table_ddl_cache[table_name] = ddl
+
+                # 针对部分场景下，用户将关键字作为列名，导致ddl中包含timestamp或datetime，导致解析失败;这里解析失败，则直接抛出异常，最终返回'''
+                if "timestamp" in ddl or "datetime" in ddl:
+                    result = LineageRunner(ddl, dialect="redshift")
+                    print(result.target_tables)
+
                 return ddl
         finally:
             # 如果创建了新连接，确保关闭它
@@ -109,9 +112,9 @@ def get_table_ddl(conn, table_name: str) -> Optional[str]:
                 print(f"关闭到数据库 {table_db_name} 的连接")
 
     except Exception as e:
-        logger.error(f"获取表 {table_name} DDL失败: {str(e)}")
+        logger.warning(f"获取表 {table_name} DDL失败: {str(e)}")
         conn.commit()
-        return None
+        return ''
 
 # 针对部分sql被截断的场景，获取完整的SQL语句
 def get_full_sql(conn, query_id: int) -> Optional[str]:
@@ -211,7 +214,8 @@ def parseSQL(query):
 
     # 如果没有命中缓存，解析SQL并存入缓存
     try:
-        result = LineageRunner(query, dialect="redshift")
+        with SQLLineageConfig(DEFAULT_SCHEMA=default_schema):
+            result = LineageRunner(query, dialect="redshift")
         print(result.target_tables)
     except Exception as e:
         logger.warning(f"使用redshift 解析SQL失败: {str(e)}，再尝试用标准 SQL 解析")
