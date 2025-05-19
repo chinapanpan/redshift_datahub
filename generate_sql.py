@@ -307,7 +307,7 @@ def save_queries_to_s3(insert_queries: List[Dict[str, Any]], batch_num: int = 1)
                                 f.write(f"\n-- Failed to get DDL for table {full_table_name}\n")
                             f.write("-" * 80 + "\n")
 
-                        f.write(f"{query}\n{'-' * 80}\n")
+                        f.write(f"{query}\n--dml\n")
                     except Exception as e:
                         logger.error(f"处理SQL查询时出错: {str(e)}")
                         logger.error(f"出错的SQL: {query_info['query_text'][:200]}...")

@@ -1,6 +1,7 @@
 import json
 import boto3
 import os
+import logging
 from sqllineage.runner import LineageRunner
 from sqllineage.config import SQLLineageConfig
 
@@ -25,6 +26,10 @@ default_database=os.environ['DEFAULT_DATABASE']
 #默认的schema名字
 default_schema=os.environ['DEFAULT_SCHEMA']
 
+# 配置日志
+logger = logging.getLogger()
+logger.setLevel("WARN")
+
 # 库名设置
 def datasetUrn(tableName):
     # 检查tableName是否包含数据库名和schema名
@@ -44,72 +49,85 @@ def datasetUrn(tableName):
 def fieldUrn(tableName, fieldName):
     return builder.make_schema_field_urn(datasetUrn(tableName), fieldName)
 
+def parseSQL(query):
+    result = None
+    try:
+        with SQLLineageConfig(DEFAULT_SCHEMA=default_schema):
+            result = LineageRunner(query, dialect=engine_type)
+            # 打印列级血缘结果
+            result.print_column_lineage()
+            print('===============')
+    except Exception as e:
+        logger.warning(f"{engine_type} 解析SQL失败: {str(e)}，再尝试用标准 SQL 解析")
+        with SQLLineageConfig(DEFAULT_SCHEMA=default_schema):
+            result = LineageRunner(query)
+            # 打印列级血缘结果
+            result.print_column_lineage()
+            print('===============')
+    return result
+
 def process_sql_from_s3(bucket, key):
     """
     从S3读取SQL文件并处理
     """
+    result_list = []
     s3_client = boto3.client('s3')
-    try:
-        response = s3_client.get_object(Bucket=bucket, Key=key)
-        sql = response['Body'].read().decode('utf-8')
 
-        with SQLLineageConfig(DEFAULT_SCHEMA=default_schema):
-            # 获取sql血缘
-            result = LineageRunner(sql,dialect=engine_type)
+    response = s3_client.get_object(Bucket=bucket, Key=key)
+    sql = response['Body'].read().decode('utf-8')
+    # 上游的生成 sql 时分割标记，拆分开，分别解析，避免某一 SQL 有问题，影响整个 SQL 文件无法解析
+    spl_parts = sql.split('--dml')
+    for part in spl_parts:
+        if part.strip():
+            try:
+                # 获取sql血缘
+                result = parseSQL(part)
+                result_list.append(result)
+            except Exception as e:
+                logger.error(f"解析SQL失败: {str(e)}")
+    return result_list
 
-            # 获取sql中的下游表名
-            targetTableName = result.target_tables[0].__str__()
-            print(result)
-            print('===============')
-            # 打印列级血缘结果
-            result.print_column_lineage()
-            print('===============')
-
-            return result
-    except Exception as e:
-        print(f"读取S3文件错误: {str(e)}")
-        raise e
-
-def generateDatahubLineage(lineage):
-    # 创建一个map数据结构来存储血缘关系的结果
+def generateDatahubLineage(result_list):
     lineage_map = {}
+    for result in result_list:
+        # 获取列级血缘
+        lineage = result.get_column_lineage
+        # 遍历列级血缘
+        for columnTuples in lineage():
+            # 逐个字段遍历
+            for i in range(len(columnTuples) - 1):
+                # 上游list
+                upStreamStrList = []
 
-    # 遍历列级血缘
-    for columnTuples in lineage():
-        # 逐个字段遍历
-        for i in range(len(columnTuples) - 1):
-            # 上游list
-            upStreamStrList = []
+                # 下游list 类似:datahub.public.dws_sales_summary.customer_name <- datahub.public.dim_customer.customer_name <- datahub.public.raw_sales_data.customer_id
+                downStreamStrList = []
+                if i + 1 < len(columnTuples):
+                    upStreamColumn = columnTuples[i]
+                    downStreamColumn = columnTuples[i + 1]
 
-            # 下游list 类似:datahub.public.dws_sales_summary.customer_name <- datahub.public.dim_customer.customer_name <- datahub.public.raw_sales_data.customer_id
-            downStreamStrList = []
-            if i + 1 < len(columnTuples):
-                upStreamColumn = columnTuples[i]
-                downStreamColumn = columnTuples[i + 1]
+                    upStreamFieldName = upStreamColumn.raw_name.__str__()
+                    upStreamTableName = upStreamColumn.__str__().replace('.' + upStreamFieldName, '').__str__()
 
-                upStreamFieldName = upStreamColumn.raw_name.__str__()
-                upStreamTableName = upStreamColumn.__str__().replace('.' + upStreamFieldName, '').__str__()
+                    downStreamFieldName = downStreamColumn.raw_name.__str__()
+                    downStreamTableName = downStreamColumn.__str__().replace('.' + downStreamFieldName, '').__str__()
 
-                downStreamFieldName = downStreamColumn.raw_name.__str__()
-                downStreamTableName = downStreamColumn.__str__().replace('.' + downStreamFieldName, '').__str__()
+                    print(f"{upStreamTableName}.{upStreamFieldName}-->{downStreamTableName}.{downStreamFieldName}")
 
-                print(f"{upStreamTableName}.{upStreamFieldName}-->{downStreamTableName}.{downStreamFieldName}")
+                    upStreamStrList.append(fieldUrn(upStreamTableName, upStreamFieldName))
+                    downStreamStrList.append(fieldUrn(downStreamTableName, downStreamFieldName))
+                    print(f"{upStreamTableName}.{upStreamFieldName}-->{downStreamTableName}.{downStreamFieldName}")
+                    fineGrainedLineage = FineGrainedLineage(upstreamType=FineGrainedLineageUpstreamType.FIELD_SET,
+                                                            upstreams=upStreamStrList,
+                                                            downstreamType=FineGrainedLineageDownstreamType.FIELD,
+                                                            downstreams=downStreamStrList)
 
-                upStreamStrList.append(fieldUrn(upStreamTableName, upStreamFieldName))
-                downStreamStrList.append(fieldUrn(downStreamTableName, downStreamFieldName))
-                print(f"{upStreamTableName}.{upStreamFieldName}-->{downStreamTableName}.{downStreamFieldName}")
-                fineGrainedLineage = FineGrainedLineage(upstreamType=FineGrainedLineageUpstreamType.FIELD_SET,
-                                                        upstreams=upStreamStrList,
-                                                        downstreamType=FineGrainedLineageDownstreamType.FIELD,
-                                                        downstreams=downStreamStrList)
+                    # 将血缘关系添加到map中
+                    if downStreamTableName not in lineage_map and downStreamTableName != '':
+                        lineage_map[downStreamTableName] = {}
+                    if upStreamTableName not in lineage_map[downStreamTableName]:
+                        lineage_map[downStreamTableName][upStreamTableName] = []
 
-                # 将血缘关系添加到map中
-                if downStreamTableName not in lineage_map and downStreamTableName != '':
-                    lineage_map[downStreamTableName] = {}
-                if upStreamTableName not in lineage_map[downStreamTableName]:
-                    lineage_map[downStreamTableName][upStreamTableName] = []
-
-                lineage_map[downStreamTableName][upStreamTableName].append(fineGrainedLineage)
+                    lineage_map[downStreamTableName][upStreamTableName].append(fineGrainedLineage)
 
     # 打印血缘关系map
     print(lineage_map)
@@ -124,11 +142,8 @@ def lambda_handler(event, context):
         key = event['Records'][0]['s3']['object']['key']
 
         # 处理SQL文件
-        result = process_sql_from_s3(bucket, key)
-
-        # 获取列级血缘
-        lineage = result.get_column_lineage
-        lineage_map = generateDatahubLineage(lineage)
+        result_list = process_sql_from_s3(bucket, key)
+        lineage_map = generateDatahubLineage(result_list)
 
         for downStreamTableName, upStreamDict in lineage_map.items():
             upStreamsList = []
