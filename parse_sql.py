@@ -183,7 +183,7 @@ def lambda_handler(event, context):
 
             # set the latest lineage
             emitter.emit_mcp(lineageMcp)
-
+        print('SQL血缘分析完成')
         return {
             'statusCode': 200,
             'body': json.dumps('SQL血缘分析完成')
