@@ -9,7 +9,7 @@ from datetime import datetime
 
 # 配置日志
 logger = logging.getLogger()
-logger.setLevel("ERROR")
+logger.setLevel("WARN")
 
 # 从环境变量获取Redshift连接配置
 REDSHIFT_CONFIG = {
@@ -196,6 +196,7 @@ def parseSQL(query):
     """解析SQL语句，如果SQL较长且已缓存，则直接返回缓存结果"""
     global sql_cache
     cache_key = ''
+    result = None
     # 如果SQL长度大于200字符，使用前200字符作为缓存键
     if len(query) > 200:
         cache_key = query[:200]
@@ -209,7 +210,12 @@ def parseSQL(query):
             return sql_cache[cache_key]
 
     # 如果没有命中缓存，解析SQL并存入缓存
-    result = LineageRunner(query, dialect="redshift")
+    try:
+        result = LineageRunner(query, dialect="redshift")
+        print(result.target_tables)
+    except Exception as e:
+        logger.warning(f"使用redshift 解析SQL失败: {str(e)}，再尝试用标准 SQL 解析")
+        result = LineageRunner(query)
     sql_cache[cache_key] = result
     return result
 
@@ -248,7 +254,7 @@ def save_queries_to_s3(insert_queries: List[Dict[str, Any]], batch_num: int = 1)
                         query = query.replace('\\n', '\n')
                         #redshift 中的sys_query_histor中可能有一些占位符，类似$1
                         query = query.replace('$', '')
-                        #query = query.replace("***'hour', c.snapshot_time::timestamp)=", "")
+                        query = query.replace("***'hour', c.snapshot_time::timestamp)=", "")
 
                         query = f"{query};"  # 加上分号结尾
 
@@ -286,7 +292,7 @@ def save_queries_to_s3(insert_queries: List[Dict[str, Any]], batch_num: int = 1)
                             full_table_name = get_real_tableName(table_name)
                             #将sql中引用的表名，改为全局统一的名字
                             #print(f"query={query}\n table={table_name}\n full={full_table_name}")
-                            query=query.replace(table_name,full_table_name)
+                            #query=query.replace(table_name,full_table_name)
 
                             # 检查表是否已经获取过DDL
                             if full_table_name in ddl_tables:
@@ -310,7 +316,7 @@ def save_queries_to_s3(insert_queries: List[Dict[str, Any]], batch_num: int = 1)
 
             # 上传到S3
             print(f"文件准备上传到S3: {local_path}")
-            s3_key = f'sql-scripts/sql_queries_{project_name}_{current_date}_batch{batch_num}.sql'
+            s3_key = f'sql-scripts/{current_date}/sql_queries_{project_name}_{current_date}_batch{batch_num}.sql'
             s3_client = boto3.client('s3')
             s3_client.upload_file(local_path, bucket_name, s3_key)
 
